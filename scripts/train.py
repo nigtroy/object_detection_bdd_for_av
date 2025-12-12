@@ -72,8 +72,8 @@ class BDD100K_IndividualFiles_Dataset(Dataset):
         
         # BDD Class Mapping
         class_map = {
-            "pedestrian": 1, "rider": 2, "car": 3, "truck": 4, 
-            "bus": 5, "train": 6, "motorcycle": 7, "bicycle": 8,
+            "pedestrian": 1, "person": 1,"rider": 2, "car": 3, "truck": 4, 
+            "bus": 5, "train": 6,"motor":7, "motorcycle": 7, "bike":8,"bicycle": 8,
             "traffic light": 9, "traffic sign": 10
         }
 
