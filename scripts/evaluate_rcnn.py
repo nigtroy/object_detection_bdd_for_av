@@ -11,17 +11,14 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 import torchvision.transforms as T
 
 # --- IMPORT YOUR DATASET CLASS ---
-# Assuming it is in a file named 'train.py' or 'dataset.py'
-# If it's in the same folder, just import it. 
-# Otherwise, paste the BDD100K_IndividualFiles_Dataset class here.
 from train import BDD100K_IndividualFiles_Dataset, collate_fn
 
 # --- CONFIGURATION ---
 VAL_IMG_DIR = r"C:\Users\gsamu\object_Detection_waymo\dataset\val_images"
 VAL_LBL_DIR = r"C:\Users\gsamu\object_Detection_waymo\annotations\val"
-MODEL_PATH = "models/bdd_model_epoch_2.pth" # Point to your best/last epoch
-NUM_CLASSES = 11 # 10 objects + 1 background
-RESULTS_FILE = "faster_rcnn_final_results_2.json"  # <--- NEW: Output file
+MODEL_PATH = "models/bdd_model_epoch_2.pth" 
+NUM_CLASSES = 11 
+RESULTS_FILE = "faster_rcnn_final_results_v3.json" 
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -42,9 +39,9 @@ def calculate_ap(precisions, recalls):
         ap += p / 11.
     return ap
 
-def evaluate_manual(model, loader, description="Evaluating"):
+def run_inference(model, loader, description="Inference"):
     model.eval()
-    print(f"--- {description} ---")
+    print(f"--- Running {description} ---")
     
     all_preds = []
     all_targets = []
@@ -65,23 +62,17 @@ def evaluate_manual(model, loader, description="Evaluating"):
                     'boxes': targets[i]['boxes'].cpu(),
                     'labels': targets[i]['labels'].cpu()
                 })
+                
+    return all_preds, all_targets
 
-    print("Calculating metrics...")
+def compute_map_at_threshold(all_preds, all_targets, iou_threshold=0.5):
     class_aps = {}
-    
-    # BDD100K Classes 1-10
+    # Fixed Class Mapping for Display
     class_names = {
-            "person": 1, "pedestrian": 1,
-            "rider": 2,
-            "car": 3,
-            "truck": 4,
-            "bus": 5,
-            "train": 6,
-            "motor": 7, "motorcycle": 7,
-            "bike": 8, "bicycle": 8,
-            "traffic light": 9,
-            "traffic sign": 10
-        }
+        1: "Pedestrian", 2: "Rider", 3: "Car", 4: "Truck", 
+        5: "Bus", 6: "Train", 7: "Motorcycle", 8: "Bicycle", 
+        9: "Traffic Light", 10: "Traffic Sign"
+    }
 
     for class_id in range(1, NUM_CLASSES):
         true_positives = []
@@ -92,11 +83,9 @@ def evaluate_manual(model, loader, description="Evaluating"):
             pred_boxes = all_preds[i]['boxes']
             pred_scores = all_preds[i]['scores']
             pred_labels = all_preds[i]['labels']
-            
             gt_boxes = all_targets[i]['boxes']
             gt_labels = all_targets[i]['labels']
             
-            # Filter by class
             p_boxes = pred_boxes[pred_labels == class_id]
             p_scores = pred_scores[pred_labels == class_id]
             g_boxes = gt_boxes[gt_labels == class_id]
@@ -105,7 +94,6 @@ def evaluate_manual(model, loader, description="Evaluating"):
             
             if len(p_boxes) == 0: continue
             
-            # Sort
             sorted_idxs = torch.argsort(p_scores, descending=True)
             p_boxes = p_boxes[sorted_idxs]
             p_scores = p_scores[sorted_idxs]
@@ -114,22 +102,20 @@ def evaluate_manual(model, loader, description="Evaluating"):
                 true_positives.extend([0] * len(p_boxes))
                 scores.extend(p_scores.tolist())
                 continue
-                
+            
             ious = box_iou(p_boxes, g_boxes)
             matched_gt = set()
             
             for j in range(len(p_boxes)):
                 best_iou, best_gt_idx = torch.max(ious[j], dim=0)
-                if best_iou > 0.5 and best_gt_idx.item() not in matched_gt:
+                if best_iou > iou_threshold and best_gt_idx.item() not in matched_gt:
                     true_positives.append(1)
                     matched_gt.add(best_gt_idx.item())
                 else:
                     true_positives.append(0)
                 scores.append(p_scores[j].item())
 
-        if num_gt_instances == 0:
-            class_aps[class_names.get(class_id, str(class_id))] = 0.0
-            continue
+        if num_gt_instances == 0: continue
             
         scores = np.array(scores)
         true_positives = np.array(true_positives)
@@ -143,12 +129,37 @@ def evaluate_manual(model, loader, description="Evaluating"):
         ap = calculate_ap(precisions, recalls)
         class_name = class_names.get(class_id, str(class_id))
         class_aps[class_name] = ap
-        print(f"{class_name} AP: {ap:.4f}")
 
     mAP = np.mean(list(class_aps.values())) if class_aps else 0.0
-    print(f"✅ mAP@50 ({description}): {mAP:.4f}")
-    
     return mAP, class_aps
+
+def evaluate_full_metrics(model, loader, description="Evaluating"):
+    # 1. Run Inference Once
+    preds, targets = run_inference(model, loader, description)
+    
+    print("\n📊 Calculating Metrics...")
+    
+    # 2. Calculate mAP@50
+    map_50, class_aps_50 = compute_map_at_threshold(preds, targets, iou_threshold=0.5)
+    print(f"✅ mAP@50: {map_50:.4f}")
+    
+    if "Overall" in description:
+        print("   --- Per Class AP (IoU=0.50) ---")
+        for k, v in class_aps_50.items():
+            print(f"   {k}: {v:.4f}")
+
+    # 3. Calculate mAP@50:95
+    print("   Calculating mAP@50:95...")
+    thresholds = np.arange(0.5, 1.0, 0.05)
+    maps = []
+    for thresh in thresholds:
+        m, _ = compute_map_at_threshold(preds, targets, iou_threshold=thresh)
+        maps.append(m)
+        
+    map_50_95 = np.mean(maps)
+    print(f"✅ mAP@50:95: {map_50_95:.4f}")
+    
+    return map_50, map_50_95, class_aps_50
 
 def measure_speed(model, dataset):
     print("\n⏱️ Measuring Inference Speed...")
@@ -173,12 +184,13 @@ def measure_speed(model, dataset):
     print(f"GPU Latency: {avg_lat:.2f} ms | FPS: {fps:.2f}")
     return avg_lat, fps
 
-# --- HELPER FOR DAY/NIGHT ---
 def get_day_night_indices(dataset):
     day_indices = []
     night_indices = []
-    print("Scanning for Day/Night...")
-    for idx, filename in enumerate(tqdm(dataset.image_files)):
+    print("\nScanning for Day/Night...")
+    scan_limit = len(dataset.image_files) 
+    
+    for idx, filename in enumerate(tqdm(dataset.image_files[:scan_limit])):
         json_file = filename.replace('.jpg', '.json')
         json_path = os.path.join(dataset.label_dir, json_file)
         if os.path.exists(json_path):
@@ -195,40 +207,59 @@ if __name__ == "__main__":
     val_dataset = BDD100K_IndividualFiles_Dataset(image_dir=VAL_IMG_DIR, label_dir=VAL_LBL_DIR, transform=transform)
     
     # 2. Load Model
+    print(f"Loading model from {MODEL_PATH}...")
     model = get_model(NUM_CLASSES)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.to(device)
     
     # 3. Overall Eval
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=2, collate_fn=collate_fn)
-    overall_map, class_aps = evaluate_manual(model, val_loader, "Overall Validation")
+    print("\n=== 1. OVERALL PERFORMANCE ===")
+    overall_map50, overall_map50_95, class_aps = evaluate_full_metrics(model, val_loader, "Overall Validation")
     
-    # 4. Day vs Night
+    # 4. Day vs Night Eval
     day_idx, night_idx = get_day_night_indices(val_dataset)
-    # Using larger subset for accuracy (1000 images each)
-    day_loader = DataLoader(Subset(val_dataset, day_idx[:1000]), batch_size=4, collate_fn=collate_fn)
-    night_loader = DataLoader(Subset(val_dataset, night_idx[:1000]), batch_size=4, collate_fn=collate_fn)
+    subset_size = 500 # Adjust as needed
     
-    print("\n--- Day vs Night ---")
-    day_map, _ = evaluate_manual(model, day_loader, "Day Subset")
-    night_map, _ = evaluate_manual(model, night_loader, "Night Subset")
+    day_loader = DataLoader(Subset(val_dataset, day_idx[:subset_size]), batch_size=4, collate_fn=collate_fn)
+    night_loader = DataLoader(Subset(val_dataset, night_idx[:subset_size]), batch_size=4, collate_fn=collate_fn)
+    
+    print("\n=== 2. ROBUSTNESS (DAY vs NIGHT) ===")
+    print("\n--- Day Subset ---")
+    # CAPTURE BOTH VARIABLES HERE
+    day_map50, day_map50_95, _ = evaluate_full_metrics(model, day_loader, "Day Subset")
+    
+    print("\n--- Night Subset ---")
+    # CAPTURE BOTH VARIABLES HERE
+    night_map50, night_map50_95, _ = evaluate_full_metrics(model, night_loader, "Night Subset")
     
     # 5. Speed
     latency, fps = measure_speed(model, val_dataset)
 
-    # --- 6. SAVE RESULTS TO FILE ---
+    # 6. Save Results
     results_data = {
         "model": "Faster R-CNN",
-        "mAP_50_overall": overall_map,
-        "mAP_50_day": day_map,
-        "mAP_50_night": night_map,
-        "drop_off_percent": ((day_map - night_map) / day_map * 100) if day_map > 0 else 0,
+        # Overall
+        "mAP_50_overall": overall_map50,
+        "mAP_50_95_overall": overall_map50_95,
+        
+        # Day
+        "mAP_50_day": day_map50,
+        "mAP_50_95_day": day_map50_95,
+        
+        # Night
+        "mAP_50_night": night_map50,
+        "mAP_50_95_night": night_map50_95,
+        
+        # Drop-off (Using 50:95 as the main robustness metric)
+        "drop_off_percent": ((day_map50_95 - night_map50_95) / day_map50_95 * 100) if day_map50_95 > 0 else 0,
+        
         "latency_ms": latency,
         "fps": fps,
-        "per_class_ap": class_aps
+        "per_class_ap_50": class_aps
     }
 
     with open(RESULTS_FILE, "w") as f:
         json.dump(results_data, f, indent=4)
         
-    print(f"\n✅ Results saved successfully to {RESULTS_FILE}")
+    print(f"\n✅ All results saved to {RESULTS_FILE}")
