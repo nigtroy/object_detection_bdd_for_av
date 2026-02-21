@@ -360,7 +360,6 @@ with st.sidebar:
     pages = {
         "Overview":  "01 — Project Overview",
         "Inference": "02 — Run Inference",
-        "Results":   "03 — Research Results",
     }
     for key, label in pages.items():
         css_class = "nav-active" if st.session_state.page == key else ""
@@ -428,6 +427,34 @@ if app_mode == "Overview":
     st.markdown('<div class="section-header">Dataset</div>', unsafe_allow_html=True)
     st.markdown("**BDD100K** — 100,000 driving images captured across diverse conditions: day/night, clear/rainy/foggy, highways and urban streets. Annotations cover 10 object categories relevant to autonomous driving.")
 
+    st.markdown('<div class="section-header">Benchmark Results</div>', unsafe_allow_html=True)
+    st.markdown("YOLOv8 is ~40× faster overall, but Faster R-CNN leads on pedestrian detection — the highest-stakes class for AV safety.")
+
+    data = {
+        "Metric":        ["mAP@50 (Overall)", "Pedestrian AP", "Latency (GPU)", "Throughput (FPS)"],
+        "Faster R-CNN":  ["0.41",             "0.601",         "54 ms",         "18"],
+        "YOLOv8-Small":  ["0.62",             "0.441",         "1.3 ms",        "700+"],
+    }
+    st.table(data)
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        st.markdown("""
+        <div class="info-box" style="border-color:rgba(124,58,237,0.3); background:rgba(124,58,237,0.05);">
+        <strong style="color:#7c3aed;">Faster R-CNN takeaway</strong><br>
+        Superior precision on pedestrians and distant objects. Strong diagonal coherence in the confusion matrix.
+        Best suited for safety-critical, compute-rich deployments.
+        </div>
+        """, unsafe_allow_html=True)
+    with col_f2:
+        st.markdown("""
+        <div class="info-box">
+        <strong style="color:#00d4ff;">YOLOv8 takeaway</strong><br>
+        Dominates on overall mAP and speed. Slight background confusion on small riders.
+        Best suited for real-time edge deployment where latency is the primary constraint.
+        </div>
+        """, unsafe_allow_html=True)
+
 # ─────────────────────────────────────────────
 # PAGE 2: INFERENCE
 # ─────────────────────────────────────────────
@@ -454,8 +481,18 @@ elif app_mode == "Inference":
     if uploaded_file is not None:
         image = Image.open(uploaded_file).convert('RGB')
 
-        st.markdown('<div class="section-header">Input Image</div>', unsafe_allow_html=True)
-        st.image(image, use_container_width=False)
+        # Placeholder holds the pre-detection preview; emptied after detection runs
+        preview = st.empty()
+        result_area = st.empty()
+
+        if "detection_done" not in st.session_state or st.session_state.get("last_file") != uploaded_file.name:
+            st.session_state.detection_done = False
+            st.session_state.last_file = uploaded_file.name
+
+        if not st.session_state.detection_done:
+            with preview.container():
+                st.markdown('<div class="section-header">Input Image</div>', unsafe_allow_html=True)
+                st.image(image, use_container_width=False)
 
         if st.button("▶ Detect Objects", type="primary"):
             with st.spinner("Running detection…"):
@@ -466,60 +503,17 @@ elif app_mode == "Inference":
                     model = load_rcnn()
                     result_img, lat = run_rcnn(model, image, conf_thresh)
 
-            st.markdown('<div class="section-header">Detection Results</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="latency-badge">⚡ {lat:.1f} ms — {model_choice}</div>', unsafe_allow_html=True)
+            # Clear the original image preview
+            preview.empty()
+            st.session_state.detection_done = True
 
-            left, right = st.columns(2)
-            with left:
-                st.image(image, use_container_width=True)
-                st.markdown('<div class="img-caption">Original</div>', unsafe_allow_html=True)
-            with right:
-                st.image(result_img, use_container_width=True)
-                st.markdown(f'<div class="img-caption">{model_choice} Detections</div>', unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────
-# PAGE 3: RESULTS
-# ─────────────────────────────────────────────
-elif app_mode == "Results":
-    st.markdown('<div class="page-title">Research <span class="title-accent">Results</span></div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-subtitle">Quantitative benchmark on BDD100K validation set</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="section-header">Speed vs. Accuracy Trade-off</div>', unsafe_allow_html=True)
-    st.markdown("YOLOv8 is ~40× faster but Faster R-CNN achieves higher precision for vulnerable road users such as pedestrians.")
-
-    data = {
-        "Metric":        ["mAP@50 (Overall)", "Pedestrian AP", "Latency (GPU)", "Throughput (FPS)"],
-        "Faster R-CNN":  ["0.41",             "0.601",         "54 ms",         "18"],
-        "YOLOv8-Small":  ["0.62",             "0.441",         "1.3 ms",        "700+"],
-    }
-    st.table(data)
-
-    st.markdown('<div class="section-header">Robustness — Day vs. Night</div>', unsafe_allow_html=True)
-    st.markdown("Both models degrade in low-light conditions. Add your day/night AP drop-off table here.")
-
-    st.markdown('<div class="section-header">Failure Analysis</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("""
-        <div class="info-box" style="border-color:rgba(124,58,237,0.3); background:rgba(124,58,237,0.05);">
-        <strong style="color:#7c3aed;">Faster R-CNN Confusion Matrix</strong><br><br>
-        Strong diagonal coherence. Rare inter-class confusion.
-        Main failure mode: missed detections on distant objects.
-        </div>
-        """, unsafe_allow_html=True)
-        # st.image("assets/rcnn_confusion.png")
-    with col2:
-        st.markdown("""
-        <div class="info-box" style="border-color:rgba(0,212,255,0.3); background:rgba(0,212,255,0.05);">
-        <strong style="color:#00d4ff;">YOLOv8 Confusion Matrix</strong><br><br>
-        Slightly higher background confusion, especially for small riders
-        and partially occluded vehicles.
-        </div>
-        """, unsafe_allow_html=True)
-        # st.image("assets/yolo_confusion.png")
-
-    st.markdown('<div class="section-header">Qualitative "Golden Image"</div>', unsafe_allow_html=True)
-    st.markdown("Faster R-CNN detecting a distant vehicle that YOLOv8 missed. Uncomment `st.image` below once assets are added.")
-    # st.image("assets/qualitative_comparison.png")ader("4. Qualitative 'Golden Image'")
-    st.markdown("Faster R-CNN detecting a distant vehicle that YOLOv8 missed.")
-    # st.image("assets/qualitative_comparison.png")
+            with result_area.container():
+                st.markdown('<div class="section-header">Detection Results</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="latency-badge">⚡ {lat:.1f} ms — {model_choice}</div>', unsafe_allow_html=True)
+                left, right = st.columns(2)
+                with left:
+                    st.image(image, use_container_width=True)
+                    st.markdown('<div class="img-caption">Original</div>', unsafe_allow_html=True)
+                with right:
+                    st.image(result_img, use_container_width=True)
+                    st.markdown(f'<div class="img-caption">{model_choice} Detections</div>', unsafe_allow_html=True)
