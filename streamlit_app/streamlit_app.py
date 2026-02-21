@@ -492,7 +492,7 @@ elif app_mode == "Inference":
         if not st.session_state.detection_done:
             with preview.container():
                 st.markdown('<div class="section-header">Input Image</div>', unsafe_allow_html=True)
-                st.image(image, use_container_width=False)
+                st.image(image, width='content')
 
         if st.button("▶ Detect Objects", type="primary"):
             with st.spinner("Running detection…"):
@@ -512,8 +512,8 @@ elif app_mode == "Inference":
                 st.markdown(f'<div class="latency-badge">⚡ {lat:.1f} ms — {model_choice}</div>', unsafe_allow_html=True)
                 left, right = st.columns(2)
                 with left:
-                    st.image(image, use_container_width=True)
+                    st.image(image, width='stretch')
                     st.markdown('<div class="img-caption">Original</div>', unsafe_allow_html=True)
                 with right:
-                    st.image(result_img, use_container_width=True)
+                    st.image(result_img, width='stretch')
                     st.markdown(f'<div class="img-caption">{model_choice} Detections</div>', unsafe_allow_html=True)
