@@ -9,7 +9,7 @@ from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 import torchvision.transforms as T
 import time
-
+    
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="AV Detection Benchmark",
@@ -459,6 +459,9 @@ if app_mode == "Overview":
 # PAGE 2: INFERENCE
 # ─────────────────────────────────────────────
 elif app_mode == "Inference":
+    import os
+    import random
+
     st.markdown('<div class="page-title">Interactive <span class="title-accent">Inference</span></div>', unsafe_allow_html=True)
     st.markdown('<div class="page-subtitle">Upload a street-view image and run detection with either model</div>', unsafe_allow_html=True)
 
@@ -476,23 +479,87 @@ elif app_mode == "Inference":
         </div>
         """, unsafe_allow_html=True)
 
+    # --- IMAGE SOURCE ---
     uploaded_file = st.file_uploader("Upload a Street-View Image", type=['jpg', 'png', 'jpeg'])
+
+    # --- SAMPLE GALLERY ---
+    image = None  # will be set by either upload or gallery selection
+
+    SAMPLE_DIR = "sample_data"
+    valid_exts = {".jpg", ".jpeg", ".png"}
+    sample_paths = []
+    if os.path.isdir(SAMPLE_DIR):
+        all_imgs = [
+            os.path.join(SAMPLE_DIR, f) for f in os.listdir(SAMPLE_DIR)
+            if os.path.splitext(f)[1].lower() in valid_exts
+        ]
+        # Seed by a stable key so the selection doesn't reshuffle on every interaction
+        if "gallery_seed" not in st.session_state:
+            st.session_state.gallery_seed = random.randint(0, 99999)
+        rng = random.Random(st.session_state.gallery_seed)
+        sample_paths = rng.sample(all_imgs, min(5, len(all_imgs)))
+
+    @st.cache_resource
+    def load_gallery_thumbs(paths):
+        """Read + resize each sample image once; cached for the app lifetime."""
+        thumbs = {}
+        for p in paths:
+            img = Image.open(p).convert('RGB')
+            img.thumbnail((320, 220), Image.BILINEAR)
+            thumbs[p] = img
+        return thumbs
+
+    gallery_thumbs = load_gallery_thumbs(tuple(sample_paths)) if sample_paths else {}
 
     if uploaded_file is not None:
         image = Image.open(uploaded_file).convert('RGB')
+        st.session_state.selected_sample = None  # clear gallery selection
+    elif sample_paths:
+        st.markdown('<div style="margin: 1.2rem 0 0.4rem; color: var(--text-muted); font-size:0.85rem;">— or select from the gallery —</div>',  unsafe_allow_html=True)
 
-        # Placeholder holds the pre-detection preview; emptied after detection runs
+        if "selected_sample" not in st.session_state:
+            st.session_state.selected_sample = None
+
+        thumb_cols = st.columns(len(sample_paths))
+        for i, (col, path) in enumerate(zip(thumb_cols, sample_paths)):
+            with col:
+                thumb = gallery_thumbs[path]  # served from cache, no disk read
+                is_selected = st.session_state.selected_sample == path
+
+                # Highlight border via a wrapper div
+                border_color = "#00d4ff" if is_selected else "#1e2d40"
+                st.markdown(
+                    f'<div style="border:2px solid {border_color}; border-radius:8px; overflow:hidden; cursor:pointer;">',
+                    unsafe_allow_html=True
+                )
+                st.image(thumb, use_container_width=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                btn_label = "✓ Selected" if is_selected else "Select"
+                if st.button(btn_label, key=f"sample_{i}"):
+                    st.session_state.selected_sample = path
+                    st.session_state.detection_done = False
+                    st.session_state.last_file = path
+                    st.rerun()
+
+        if st.session_state.selected_sample:
+            image = Image.open(st.session_state.selected_sample).convert('RGB')
+
+    # --- SHARED DETECTION FLOW (upload or gallery) ---
+    if image is not None:
+        source_key = uploaded_file.name if uploaded_file else st.session_state.get("selected_sample", "")
+
         preview = st.empty()
         result_area = st.empty()
 
-        if "detection_done" not in st.session_state or st.session_state.get("last_file") != uploaded_file.name:
+        if "detection_done" not in st.session_state or st.session_state.get("last_file") != source_key:
             st.session_state.detection_done = False
-            st.session_state.last_file = uploaded_file.name
+            st.session_state.last_file = source_key
 
         if not st.session_state.detection_done:
             with preview.container():
                 st.markdown('<div class="section-header">Input Image</div>', unsafe_allow_html=True)
-                st.image(image, width='content')
+                st.image(image, use_container_width=False)
 
         if st.button("▶ Detect Objects", type="primary"):
             with st.spinner("Running detection…"):
@@ -503,7 +570,6 @@ elif app_mode == "Inference":
                     model = load_rcnn()
                     result_img, lat = run_rcnn(model, image, conf_thresh)
 
-            # Clear the original image preview
             preview.empty()
             st.session_state.detection_done = True
 
@@ -512,8 +578,8 @@ elif app_mode == "Inference":
                 st.markdown(f'<div class="latency-badge">⚡ {lat:.1f} ms — {model_choice}</div>', unsafe_allow_html=True)
                 left, right = st.columns(2)
                 with left:
-                    st.image(image, width='stretch')
+                    st.image(image, use_container_width=True)
                     st.markdown('<div class="img-caption">Original</div>', unsafe_allow_html=True)
                 with right:
-                    st.image(result_img, width='stretch')
+                    st.image(result_img, use_container_width=True)
                     st.markdown(f'<div class="img-caption">{model_choice} Detections</div>', unsafe_allow_html=True)
