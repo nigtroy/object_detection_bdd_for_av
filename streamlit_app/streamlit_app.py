@@ -4,7 +4,6 @@ import numpy as np
 import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
-
 from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
@@ -12,6 +11,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 import torchvision.transforms as T
 import time
 import os
+import random
 
 # --- CONFIGURATION ---
 st.set_page_config(
@@ -52,11 +52,11 @@ st.markdown("""
     }
 
     /* Sidebar styling */
-    [data-testid="stSidebar"] {
+    [data-testid="collapsedControl"] {
         background: var(--bg-secondary) !important;
         border-right: 1px solid var(--border) !important;
     }
-    [data-testid="stSidebar"] > div {
+    [data-testid="collapsedControl"] > div {
         padding-top: 2rem;
     }
 
@@ -271,7 +271,8 @@ def get_model_path(filename):
 # --- LOAD MODELS (Cached for Speed) ---
 @st.cache_resource
 def load_yolo():
-    return get_model_path(YOLO_FILENAME)
+    model_path =  get_model_path(YOLO_FILENAME)
+    return YOLO(model_path)
 
 @st.cache_resource
 def load_rcnn():
@@ -478,8 +479,6 @@ if app_mode == "Overview":
 # PAGE 2: INFERENCE
 # ─────────────────────────────────────────────
 elif app_mode == "Inference":
-    import os
-    import random
 
     st.markdown('<div class="page-title">Interactive <span class="title-accent">Inference</span></div>', unsafe_allow_html=True)
     st.markdown('<div class="page-subtitle">Upload a street-view image and run detection with either model</div>', unsafe_allow_html=True)
