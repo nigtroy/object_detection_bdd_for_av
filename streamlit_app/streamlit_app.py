@@ -4,12 +4,15 @@ import numpy as np
 import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
+
+from huggingface_hub import hf_hub_download
 from ultralytics import YOLO
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 import torchvision.transforms as T
 import time
-    
+import os
+
 # --- CONFIGURATION ---
 st.set_page_config(
     page_title="AV Detection Benchmark",
@@ -250,18 +253,34 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Set these to your Hugging Face repo, e.g. "yourname/av-detection-models"
+HF_REPO_ID = "nigtroy/av-detection-model"
+YOLO_FILENAME    = "best.pt"
+RCNN_FILENAME    = "bdd_model_epoch_2.pth"
+
+def get_model_path(filename):
+    """Download model from Hugging Face Hub if not already cached locally."""
+    # On Community Cloud, hf_hub_download caches to ~/.cache/huggingface/
+    # so the download only happens once per cold start
+    local_path = os.path.join("models", filename)
+    if os.path.exists(local_path):
+        return local_path  # use local file if present (local dev)
+    return hf_hub_download(repo_id=HF_REPO_ID, filename=filename)
+
+
 # --- LOAD MODELS (Cached for Speed) ---
 @st.cache_resource
 def load_yolo():
-    return YOLO("models/best.pt")
+    return get_model_path(YOLO_FILENAME)
 
 @st.cache_resource
 def load_rcnn():
+    model_path = get_model_path(RCNN_FILENAME)
     num_classes = 11
     model = fasterrcnn_resnet50_fpn(weights=None)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    checkpoint = torch.load("models/bdd_model_epoch_2.pth", map_location=torch.device('cpu'))
+    checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
     model.load_state_dict(checkpoint)
     model.eval()
     # Warm up the model so first inference is faster
