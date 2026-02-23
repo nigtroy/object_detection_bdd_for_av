@@ -510,6 +510,8 @@ elif app_mode == "Inference":
     # --- SAMPLE GALLERY ---
     image = None  # will be set by either upload or gallery selection
 
+    st.write(os.listdir("sample_data") if os.path.isdir("sample_data") else "sample_data folder not found")
+
     SAMPLE_DIR = "sample_data"
     valid_exts = {".jpg", ".jpeg", ".png"}
     sample_paths = []
