@@ -52,11 +52,11 @@ st.markdown("""
     }
 
     /* Sidebar styling */
-    [data-testid="collapsedControl"] {
+    [data-testid="stSidebar"] {
         background: var(--bg-secondary) !important;
         border-right: 1px solid var(--border) !important;
     }
-    [data-testid="collapsedControl"] > div {
+    [data-testid="stSidebar"] > div {
         padding-top: 2rem;
     }
 
@@ -238,6 +238,12 @@ st.markdown("""
         text-transform: uppercase;
     }
 
+    /* Hide sidebar collapse arrow — sidebar stays permanently visible */
+    [data-testid="collapsedControl"],
+    [data-testid="stSidebarCollapsedControl"] {
+        display: none !important;
+    }
+
     /* Divider */
     hr {
         border-color: var(--border) !important;
@@ -252,6 +258,7 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
 
 # Set these to your Hugging Face repo, e.g. "yourname/av-detection-models"
 HF_REPO_ID = "nigtroy/av-detection-model"
@@ -550,7 +557,7 @@ elif app_mode == "Inference":
                     f'<div style="border:2px solid {border_color}; border-radius:8px; overflow:hidden; cursor:pointer;">',
                     unsafe_allow_html=True
                 )
-                st.image(thumb, use_container_width=True)
+                st.image(thumb, width='stretch')
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 btn_label = "✓ Selected" if is_selected else "Select"
@@ -577,7 +584,7 @@ elif app_mode == "Inference":
         if not st.session_state.detection_done:
             with preview.container():
                 st.markdown('<div class="section-header">Input Image</div>', unsafe_allow_html=True)
-                st.image(image, use_container_width=False)
+                st.image(image, width='content')
 
         if st.button("▶ Detect Objects", type="primary"):
             with st.spinner("Running detection…"):
@@ -596,8 +603,8 @@ elif app_mode == "Inference":
                 st.markdown(f'<div class="latency-badge">⚡ {lat:.1f} ms — {model_choice}</div>', unsafe_allow_html=True)
                 left, right = st.columns(2)
                 with left:
-                    st.image(image, use_container_width=True)
+                    st.image(image, width='stretch')
                     st.markdown('<div class="img-caption">Original</div>', unsafe_allow_html=True)
                 with right:
-                    st.image(result_img, use_container_width=True)
+                    st.image(result_img, width='stretch')
                     st.markdown(f'<div class="img-caption">{model_choice} Detections</div>', unsafe_allow_html=True)
