@@ -12,10 +12,11 @@ def train_yolo():
         data=r"C:\Users\gsamu\object_Detection_waymo\bdd.yaml",    # Path to your config
         epochs=3,           # Same epochs as Faster R-CNN
         imgsz=512,          # Standard YOLO size (Faster R-CNN uses ~800-1333, but 640 is standard for speed)
-        batch=4,            # YOLO is efficient, try 8 or 16
-        name=r"C:\Users\gsamu\object_Detection_waymo\results\bdd_yolo_run_s2", # Name of the folder where results will save
+        batch=32,            # YOLO is efficient, try 8 or 16
+        name=r"C:\Users\gsamu\object_Detection_waymo\results\bdd_yolo_rog", # Name of the folder where results will save
         device=0,           # GPU ID
-        workers=2,
+        workers=0,
+        plots=True,
         exist_ok=True,       # Overwrite existing run folder
         
         # Fair Comparison settings (Optional)

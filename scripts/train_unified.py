@@ -3,6 +3,10 @@ import torchvision
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
+import torch.backends.cudnn as cudnn
+from torch.cuda.amp import GradScaler
+from torch import autocast
 import torchvision.transforms as T
 import sys
 import os
@@ -24,7 +28,10 @@ NUM_EPOCHS = 3
 LEARNING_RATE = 0.005 # Initial LR (will be lower if resuming)
 SAVE_FREQUENCY = 500  # Save every 500 steps
 LIMIT_IMAGES = 30000  # 30k subset
-NUM_WORKERS = 4       # Set to 0 if Windows gives errors
+NUM_WORKERS = 4     # Set to 0 if Windows gives errors
+
+# Initialize TensorBoard Writer
+writer = SummaryWriter(log_dir="models/faster_rcnn_logs")
 
 # --- 1. DATASET CLASS (With Fixed Class Mapping) ---
 class BDD100K_IndividualFiles_Dataset(Dataset):
@@ -159,13 +166,16 @@ def find_latest_checkpoint():
     
     return found_checkpoints[0] # Returns tuple: (epoch, step, filename)
 
-
-# --- 4. MAIN TRAINING FUNCTION ---
 def train(resume=False):
     # Setup Device
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     print(f"Training on: {device}")
     
+    # --- OPTIMIZATION 1: cuDNN Benchmark ---
+    # This optimizes convolution algorithms for your specific RTX 5070 Ti
+    if device.type == 'cuda':
+        cudnn.benchmark = True 
+
     # Setup Directories
     os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -177,10 +187,15 @@ def train(resume=False):
         IMAGE_DIR, LABEL_DIR, transform=transform, limit=LIMIT_IMAGES
     )
     
+    # --- OPTIMIZATION 2: DataLoader Prefetching ---
     data_loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True, 
-        num_workers=NUM_WORKERS, collate_fn=collate_fn,
-        pin_memory=True if device.type == 'cuda' else False
+        dataset, 
+        batch_size=BATCH_SIZE, # Push this to 8 or 16 depending on VRAM!
+        shuffle=True, 
+        num_workers=NUM_WORKERS, # Set to 8 or 12
+        collate_fn=collate_fn,
+        pin_memory=True if device.type == 'cuda' else False,
+        prefetch_factor=2 if NUM_WORKERS > 0 else None # Keeps 2 batches ready per worker
     )
 
     # Initialize Model
@@ -189,8 +204,11 @@ def train(resume=False):
     
     # Optimizer
     params = [p for p in model.parameters() if p.requires_grad]
-    # Default LR, will be lowered if resuming
     optimizer = torch.optim.SGD(params, lr=LEARNING_RATE, momentum=0.9, weight_decay=0.0005)
+
+    # --- OPTIMIZATION 3: Initialize AMP Scaler ---
+    # This prevents gradient underflow when using half-precision math
+    scaler = GradScaler() 
 
     start_epoch = 0
     resume_step = -1
@@ -205,19 +223,17 @@ def train(resume=False):
             
             checkpoint = torch.load(latest_file)
             
-            # Load Weights
             if 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
-                # Optional: Load optimizer state if available
-                # if 'optimizer_state_dict' in checkpoint:
-                #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # Optional: load optimizer/scaler state
+                # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                # scaler.load_state_dict(checkpoint['scaler_state_dict'])
             else:
-                model.load_state_dict(checkpoint) # Legacy format
+                model.load_state_dict(checkpoint) 
             
             start_epoch = latest_ep
             resume_step = latest_st
             
-            # Lower LR for stability when resuming
             if start_epoch > 0:
                 print("   Reducing learning rate to 0.001 for stability.")
                 for param_group in optimizer.param_groups:
@@ -243,24 +259,35 @@ def train(resume=False):
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-            # Forward Pass
-            loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())
+            optimizer.zero_grad()
+
+            # --- OPTIMIZATION 4: Mixed Precision Forward Pass ---
+            with autocast(device_type='cuda'):
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
 
             # NaN Check
             if not torch.isfinite(losses):
                 print(f"⚠️ WARNING: Loss is {losses.item()} at step {i}. Skipping.")
-                optimizer.zero_grad()
                 continue
 
-            # Backward Pass
-            optimizer.zero_grad()
-            losses.backward()
+            # --- OPTIMIZATION 5: Scaled Backward Pass ---
+            scaler.scale(losses).backward()
+            
+            # Unscale before clipping gradients
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-            optimizer.step()
+            
+            # Step scaler
+            scaler.step(optimizer)
+            scaler.update()
 
             epoch_loss += losses.item()
             
+            # Log to TensorBoard every 10 batches
+            if i % 10 == 0:
+                writer.add_scalar('Training Loss (Batch)', losses.item(), epoch * len(data_loader) + i)
+                
             # Logging
             if i % 20 == 0:
                 print(f"Epoch: {epoch}, Step: {i}, Loss: {losses.item():.4f}")
@@ -274,16 +301,147 @@ def train(resume=False):
                     'step': i,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(), # Save scaler state!
                     'loss': losses.item()
                 }, save_path)
 
         # End of Epoch Save
         avg_loss = epoch_loss / len(data_loader)
+        writer.add_scalar('Training Loss (Epoch)', avg_loss, epoch)
         print(f"--- End of Epoch {epoch} | Avg Loss: {avg_loss:.4f} ---")
         
         save_path = os.path.join(MODEL_SAVE_DIR, f"bdd_model_epoch_{epoch}.pth")
         torch.save(model.state_dict(), save_path)
         print(f"✅ Model saved: {save_path}")
+# # --- 4. MAIN TRAINING FUNCTION ---
+# def train(resume=False):
+#     # Setup Device
+#     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+#     print(f"Training on: {device}")
+    
+#     # Setup Directories
+#     os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+#     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+#     # Setup Data
+#     print("Loading Dataset...")
+#     transform = T.Compose([T.ToTensor()])
+#     dataset = BDD100K_IndividualFiles_Dataset(
+#         IMAGE_DIR, LABEL_DIR, transform=transform, limit=LIMIT_IMAGES
+#     )
+    
+#     data_loader = DataLoader(
+#         dataset, batch_size=BATCH_SIZE, shuffle=True, 
+#         num_workers=NUM_WORKERS, collate_fn=collate_fn,
+#         pin_memory=True if device.type == 'cuda' else False
+#     )
+
+#     # Initialize Model
+#     model = get_model(NUM_CLASSES)
+#     model.to(device)
+    
+#     # Optimizer
+#     params = [p for p in model.parameters() if p.requires_grad]
+#     # Default LR, will be lowered if resuming
+#     optimizer = torch.optim.SGD(params, lr=LEARNING_RATE, momentum=0.9, weight_decay=0.0005)
+
+#     start_epoch = 0
+#     resume_step = -1
+
+#     # --- RESUME LOGIC ---
+#     if resume:
+#         latest_ep, latest_st, latest_file = find_latest_checkpoint()
+        
+#         if latest_file:
+#             print(f"✅ Found checkpoint: {latest_file}")
+#             print(f"   Resuming from Epoch {latest_ep}, Step {latest_st + 1}")
+            
+#             checkpoint = torch.load(latest_file)
+            
+#             # Load Weights
+#             if 'model_state_dict' in checkpoint:
+#                 model.load_state_dict(checkpoint['model_state_dict'])
+#                 # Optional: Load optimizer state if available
+#                 # if 'optimizer_state_dict' in checkpoint:
+#                 #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+#             else:
+#                 model.load_state_dict(checkpoint) # Legacy format
+            
+#             start_epoch = latest_ep
+#             resume_step = latest_st
+            
+#             # Lower LR for stability when resuming
+#             if start_epoch > 0:
+#                 print("   Reducing learning rate to 0.001 for stability.")
+#                 for param_group in optimizer.param_groups:
+#                     param_group['lr'] = 0.001
+#         else:
+#             print("❌ No checkpoint found. Starting from scratch.")
+
+#     # --- TRAINING LOOP ---
+#     print(f"Starting Training from Epoch {start_epoch}...")
+    
+#     for epoch in range(start_epoch, NUM_EPOCHS):
+#         model.train()
+#         epoch_loss = 0
+        
+#         for i, (images, targets) in enumerate(data_loader):
+            
+#             # Fast Forward Check
+#             if epoch == start_epoch and i <= resume_step:
+#                 if i % 100 == 0:
+#                     print(f"⏩ Skipping processed batch {i}/{resume_step}...", end='\r')
+#                 continue 
+
+#             images = list(image.to(device) for image in images)
+#             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+#             # Forward Pass
+#             loss_dict = model(images, targets)
+#             losses = sum(loss for loss in loss_dict.values())
+
+#             # NaN Check
+#             if not torch.isfinite(losses):
+#                 print(f"⚠️ WARNING: Loss is {losses.item()} at step {i}. Skipping.")
+#                 optimizer.zero_grad()
+#                 continue
+
+#             # Backward Pass
+#             optimizer.zero_grad()
+#             losses.backward()
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+#             optimizer.step()
+
+#             epoch_loss += losses.item()
+            
+#             # Log to TensorBoard every 10 batches
+#             if i % 10 == 0:
+#                 writer.add_scalar('Training Loss (Batch)', losses.item(), epoch * len(data_loader) + i)
+                
+#             # Logging
+#             if i % 20 == 0:
+#                 print(f"Epoch: {epoch}, Step: {i}, Loss: {losses.item():.4f}")
+
+#             # Mid-Epoch Save
+#             if i > 0 and i % SAVE_FREQUENCY == 0:
+#                 save_path = os.path.join(CHECKPOINT_DIR, f"bdd_checkpoint_epoch_{epoch}_step_{i}.pth")
+#                 print(f"💾 Saving backup: {save_path}")
+#                 torch.save({
+#                     'epoch': epoch,
+#                     'step': i,
+#                     'model_state_dict': model.state_dict(),
+#                     'optimizer_state_dict': optimizer.state_dict(),
+#                     'loss': losses.item()
+#                 }, save_path)
+
+#         # End of Epoch Save
+#         avg_loss = epoch_loss / len(data_loader)
+#         writer.add_scalar('Training Loss (Epoch)', avg_loss, epoch)
+#         print(f"--- End of Epoch {epoch} | Avg Loss: {avg_loss:.4f} ---")
+        
+#         save_path = os.path.join(MODEL_SAVE_DIR, f"bdd_model_epoch_{epoch}.pth")
+#         torch.save(model.state_dict(), save_path)
+#         print(f"✅ Model saved: {save_path}")
 
 if __name__ == "__main__":
     # To run: python train_unified.py
